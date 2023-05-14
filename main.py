@@ -1,24 +1,20 @@
 import re
 import pandas as pd
 import numpy as np
+import emoji
 import matplotlib.pyplot as plt
 from fuzzywuzzy import fuzz
-# import emoji
+import demoji
+import spacy
+from spacy.matcher import PhraseMatcher
 
-def remove_mutltimedia_omited(df):
-    """
-    Validates and cleans a DataFrame based on certain rules:
-    1. Remove rows that contain only the string "<Multimedia omitido>"
-    2. Replace any occurrence of the string "<Multimedia omitido>" with an empty string
-    """
+# initialize demoji library
+# demoji.download_codes()
 
-    df = df[~(df['msg'] == '<Multimedia omitido>')] # remove rows with only <Multimedia omitido>
-    df['msg'] = df['msg'].str.replace('<Multimedia omitido>', '') # replace <Multimedia omitido> with empty string
-    return df
+# Load the language model
+nlp = spacy.load("es_core_news_sm")
 
 
-import re
-import pandas as pd
 
 def read_file(file_path):
     with open(file_path, "r") as f:
@@ -57,17 +53,65 @@ def add_date_columns(df):
     df["day"] = df["date"].dt.day
     return df
 
-def remove_mutltimedia_omited(df):
-    """
-    Validates and cleans a DataFrame based on certain rules:
-    1. Remove rows that contain only the string "<Multimedia omitido>"
-    2. Replace any occurrence of the string "<Multimedia omitido>" with an empty string
-    """
+def remove_keywords(df, col):
+    # remove strings between "<" and ">" characters
+    df[col] = df[col].str.replace(r"<[^>]*>", "")
 
-    df = df[~(df['msg'] == '<Multimedia omitido>')] # remove rows with only <Multimedia omitido>
-    df['msg'] = df['msg'].str.replace('<Multimedia omitido>', '') # replace <Multimedia omitido> with empty string
+    # remove strings between ":" characters
+    df[col] = df[col].str.replace(r":[^:]*:", "")
+        
     return df
 
+# function to remove emojis from a specific column of a DataFrame
+def remove_emojis(df, col):
+
+    # convert emojis to text representations and remove any remaining emojis
+    df[col] = df[col].apply(lambda x: re.sub(r":[^:\s]+:", " ", demoji.replace_with_desc(x)))
+    return df
+
+
+def clean_messages(df, col):
+    """
+    Cleans a DataFrame of WhatsApp messages by performing the following steps:
+    1. Remove rows that contain only the string "<Multimedia omitted>"
+    2. Remove emojis and any text between colons (e.g. :smile: or :round_pushpin:)
+    3. Remove any URLs (http or www) from messages
+    
+    Args:
+        df (pandas.DataFrame): the DataFrame to be cleaned
+        col (str): the name of the column containing the messages
+    
+    Returns:
+        pandas.DataFrame: the cleaned DataFrame
+    """
+    
+    # Step 1: Remove rows that contain only "<Multimedia omitted>"
+    df = df[~(df[col] == "<Multimedia omitted>")]
+    
+    # Step 2: Remove emojis and any text between colons (e.g. :smile: or :round_pushpin:)
+    emoji_pattern = re.compile("["
+                               u"\U0001F600-\U0001F64F"  # emoticons
+                               u"\U0001F300-\U0001F5FF"  # symbols & pictographs
+                               u"\U0001F680-\U0001F6FF"  # transport & map symbols
+                               u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
+                               "]+", flags=re.UNICODE)
+    
+    def remove_emojis_and_colon_text(text):
+        # Remove emojis
+        text = emoji_pattern.sub(r"", text)
+        
+        # Remove text between colons
+        text = re.sub(r":[^:\s]+:", "", text)
+        
+        return text
+    
+    df[col] = df[col].apply(remove_emojis_and_colon_text)
+    
+    # Step 3: Remove URLs
+    df[col] = df[col].str.replace(r"http\S+", "")
+    df[col] = df[col].str.replace(r"www\S+", "")
+    
+    return df
 
 def filter_by_user(df, username):
     """
@@ -89,8 +133,6 @@ def filter_by_date(df, year=None, month=None, day=None):
     return df[mask]
 
 
-
-
 def match_keywords(dataframe, column, keywords, threshold=80, highlight=False):
     """
     Matches a list of keywords to a column of a Pandas DataFrame using the Levenshtein distance algorithm.
@@ -108,11 +150,75 @@ def match_keywords(dataframe, column, keywords, threshold=80, highlight=False):
     matches = []
     for keyword in keywords:
         for i, row in dataframe.iterrows():
+            print(fuzz.token_set_ratio( keyword.lower(), row[column].lower()) >= threshold)
+            print(row[column].lower())
+            print(keyword.lower())
+            print("\n\n\n\n")
             if fuzz.token_set_ratio( keyword.lower(), row[column].lower()) >= threshold:
                 matches.append(i)
             if highlight:
                     dataframe.at[i, column] = row[column].replace(keyword, keyword.upper())
     return dataframe.loc[matches].drop_duplicates()
+
+# Define a function to apply the NLP matching
+def nlp_match(df, col):
+    matches = []
+    for doc in nlp.pipe(df[col], disable=["parser", "ner"]):
+        found_matches = []
+        for match_id, start, end in matcher(doc):
+            found_matches.append(doc[start:end].text.lower()) # Convert to lowercase
+        found_matches = list(set(found_matches)) # Remove duplicates
+        matches.append(found_matches)
+    df["matches"] = matches
+    return df
+
+
+specifications_dict = {
+        "recámaras": "Bedrooms",
+        "recamara": "Bedrooms",
+        "recamaras": "Bedrooms",
+        "rec": "Bedrooms",
+        "recs": "Bedrooms",
+        "r": "Bedrooms",
+        "hab": "Bedrooms",
+        "recamaras": "Bedrooms",
+        "baños": "Bathrooms",
+        "banos": "Bathrooms",
+        "b": "Bathrooms",
+        "estacionamiento": "Parking",
+        "estacionamiento": "Parking",
+        "est": "Parking",
+        "balcon": "Balcony",
+        "balcon": "Balcony",
+        "lb": "Linea Blanca"
+    # Add more variations as needed
+    }
+
+def extract_apartment_specifications(df, text_column):
+    specifications = []
+    for text in df[text_column]:
+        doc = nlp(text.lower())
+        spec_dict = {}
+        for token in doc:
+            if token.text in specifications_dict:
+                spec_dict[specifications_dict[token.text]] = None
+
+                for child in token.children:
+                    if child.dep_ == "nummod":
+                        child_text = child.text.replace(",", "")
+
+                        if '-' in child_text:
+                            child_text = child_text.split('-')[0]
+                            
+                        try:
+                            spec_dict[specifications_dict[token.text]] = int(child_text)
+                        except ValueError:
+                            pass
+        specifications.append(spec_dict)
+    df['specifications'] = specifications
+    return df
+
+
 
 
 content = read_file("sample-brokers.txt")
@@ -120,9 +226,27 @@ df = split_data(content)
 df = add_date_columns(df)
 
 # filtered_df = filter_by_user(df, "Meibilin Castellanos")
-data = remove_mutltimedia_omited(df)
-filtered_df =  match_keywords(data, "msg", ['cde'], True)
+# df_e = remove_emojis(df, 'msg')
+# df = remove_keywords(df_e,'msg')
 
+df = clean_messages(df, 'msg')
+
+
+# filtered_df =  match_keywords(df, "msg", ['costa del este' ], True)
+# Define your keywords
+keywords = ["venta", "compra", "alquiler", "inmueble", "costa del este"]
+
+# Initialize the PhraseMatcher with your keywords
+matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
+patterns = [nlp(text.lower()) for text in keywords]
+matcher.add("Keyword", None, *patterns)
+
+# Apply the NLP matching
+filtered_df = nlp_match(df, "msg")
+result = extract_apartment_specifications(filtered_df, 'msg')
+
+# Print the results
+print(result)
 
 
 # user_name = "Meibilin Castellanos" # Replace with the user name you want to filter by
@@ -132,7 +256,7 @@ filtered_df =  match_keywords(data, "msg", ['cde'], True)
 
 # print(filtered_df)
 
-filtered_df.to_csv("sample.csv", index=False)
+result.to_csv("sample.csv", index=False, encoding='UTF-8')
 
 
 # df = rawToDf("sample-brokers.txt", '12hr')
