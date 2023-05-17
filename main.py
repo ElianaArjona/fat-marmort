@@ -7,6 +7,7 @@ from fuzzywuzzy import fuzz
 import demoji
 import spacy
 from spacy.matcher import PhraseMatcher
+from spaczz.matcher import FuzzyMatcher
 
 # initialize demoji library
 # demoji.download_codes()
@@ -14,8 +15,25 @@ from spacy.matcher import PhraseMatcher
 # Load the language model
 nlp = spacy.load("es_core_news_sm")
 
+specifications_dict = {
+        "lb": "linea blanca",
+        "linea blanca":"linea blanca",
+        "amoblado":"amoblado",
+        "muebles":"amoblado",
+        "semi":"amoblado",
+        "venta":"venta",
+        "alquiler":"alquiler",
+        "costa del este": "costa del este",
+        "cde": "costa del este", # lo confunde con stops 
+        "coco del mar":"coco del mar",
+        "buscar":"busqueda",
+        "necesito":"busqueda",
+        "oferzco":"oferta",
+        "ofert":"oferta"
+    # Add more variations as needed
+    }
 
-
+# ------------ FORMAT DATA ------------
 def read_file(file_path):
     with open(file_path, "r") as f:
         content = f.read()
@@ -53,16 +71,8 @@ def add_date_columns(df):
     df["day"] = df["date"].dt.day
     return df
 
-def remove_keywords(df, col):
-    # remove strings between "<" and ">" characters
-    df[col] = df[col].str.replace(r"<[^>]*>", "")
 
-    # remove strings between ":" characters
-    df[col] = df[col].str.replace(r":[^:]*:", "")
-        
-    return df
-
-# function to remove emojis from a specific column of a DataFrame
+# -------- CLEAN DATA --------------
 def remove_emojis(df, col):
 
     # convert emojis to text representations and remove any remaining emojis
@@ -73,7 +83,7 @@ def remove_emojis(df, col):
 def clean_messages(df, col):
     """
     Cleans a DataFrame of WhatsApp messages by performing the following steps:
-    1. Remove rows that contain only the string "<Multimedia omitted>"
+    1. Remove rows that contain only the string "<Multimedia omitido>"
     2. Remove emojis and any text between colons (e.g. :smile: or :round_pushpin:)
     3. Remove any URLs (http or www) from messages
     
@@ -85,8 +95,8 @@ def clean_messages(df, col):
         pandas.DataFrame: the cleaned DataFrame
     """
     
-    # Step 1: Remove rows that contain only "<Multimedia omitted>"
-    df = df[~(df[col] == "<Multimedia omitted>")]
+    # Step 1: Remove rows that contain only "<Multimedia omitido>"
+    df = df[~(df[col] == "<Multimedia omitido>")]
     
     # Step 2: Remove emojis and any text between colons (e.g. :smile: or :round_pushpin:)
     emoji_pattern = re.compile("["
@@ -113,6 +123,17 @@ def clean_messages(df, col):
     
     return df
 
+def remove_keywords(df, col):
+    # remove strings between "<" and ">" characters
+    df[col] = df[col].str.replace(r"<[^>]*>", "")
+
+    # remove strings between ":" characters
+    df[col] = df[col].str.replace(r":[^:]*:", "")
+        
+    return df
+
+
+# ------ FILTER --------------
 def filter_by_user(df, username):
     """
     Filters a DataFrame by a given username and returns a new DataFrame with only the rows
@@ -132,6 +153,7 @@ def filter_by_date(df, year=None, month=None, day=None):
     mask &= df["date"].dt.day == day if day is not None else True
     return df[mask]
 
+# ------- MATCHER ---------------------
 
 def match_keywords(dataframe, column, keywords, threshold=80, highlight=False):
     """
@@ -153,46 +175,38 @@ def match_keywords(dataframe, column, keywords, threshold=80, highlight=False):
             print(fuzz.token_set_ratio( keyword.lower(), row[column].lower()) >= threshold)
             print(row[column].lower())
             print(keyword.lower())
-            print("\n\n\n\n")
+
             if fuzz.token_set_ratio( keyword.lower(), row[column].lower()) >= threshold:
                 matches.append(i)
+
             if highlight:
                     dataframe.at[i, column] = row[column].replace(keyword, keyword.upper())
+
+    
+
+    # df["matches"] = matches
+
     return dataframe.loc[matches].drop_duplicates()
 
-# Define a function to apply the NLP matching
-def nlp_match(df, col):
+def nlp_match(df, col, dic):
+    # Initialize the PhraseMatcher with your keywords
+    matcher = PhraseMatcher(nlp.vocab, attr="LOWER", )
+    patterns = [nlp(text.lower()) for text in specifications_dict]
+    matcher.add("Keyword", None, *patterns)
+
     matches = []
-    for doc in nlp.pipe(df[col], disable=["parser", "ner"]):
+    for doc in nlp.pipe(df[col], disable=["parser", "ner"]): # by line
         found_matches = []
-        for match_id, start, end in matcher(doc):
-            found_matches.append(doc[start:end].text.lower()) # Convert to lowercase
+        for _, start, end in matcher(doc, ): # by word
+            keyword = doc[start:end].text.lower()
+            found_matches.append(dic.get(keyword) ) # Convert to lowercase
+            
         found_matches = list(set(found_matches)) # Remove duplicates
+
         matches.append(found_matches)
     df["matches"] = matches
     return df
 
-
-specifications_dict = {
-        "recámaras": "Bedrooms",
-        "recamara": "Bedrooms",
-        "recamaras": "Bedrooms",
-        "rec": "Bedrooms",
-        "recs": "Bedrooms",
-        "r": "Bedrooms",
-        "hab": "Bedrooms",
-        "recamaras": "Bedrooms",
-        "baños": "Bathrooms",
-        "banos": "Bathrooms",
-        "b": "Bathrooms",
-        "estacionamiento": "Parking",
-        "estacionamiento": "Parking",
-        "est": "Parking",
-        "balcon": "Balcony",
-        "balcon": "Balcony",
-        "lb": "Linea Blanca"
-    # Add more variations as needed
-    }
 
 def extract_apartment_specifications(df, text_column):
     specifications = []
@@ -209,7 +223,7 @@ def extract_apartment_specifications(df, text_column):
 
                         if '-' in child_text:
                             child_text = child_text.split('-')[0]
-                            
+
                         try:
                             spec_dict[specifications_dict[token.text]] = int(child_text)
                         except ValueError:
@@ -219,7 +233,36 @@ def extract_apartment_specifications(df, text_column):
     return df
 
 
+# -------- FUZZY -----------------
+def nlp_fuzzy_match(df, col, dic):
+    keysList = list(dic.keys())
+    threshold = 70
+    matches = []
 
+    # Initialize the PhraseMatcher with your keywords
+    matcher = FuzzyMatcher(nlp.vocab)
+    for text in keysList:
+        matcher.add("SPECS",[nlp(text.lower())])
+
+    for data in df[col]:
+        found_matches = []
+        doc = nlp(data)
+        for _, start, end, ratio, pattern in matcher(doc): 
+            if ratio >= threshold:
+                value = dic.get(pattern.lower())
+                keyword = value + "_" + str(ratio)
+            else:
+                keyword = ''
+            
+            found_matches.append(keyword) # Convert to lowercase
+            
+        found_matches = list(set(found_matches)) # Remove duplicates
+
+        matches.append(found_matches)
+    df["matches"] = matches
+    return df
+
+# --------------- MAIN ----------------
 
 content = read_file("sample-brokers.txt")
 df = split_data(content)
@@ -228,25 +271,21 @@ df = add_date_columns(df)
 # filtered_df = filter_by_user(df, "Meibilin Castellanos")
 # df_e = remove_emojis(df, 'msg')
 # df = remove_keywords(df_e,'msg')
-
+# keywords = ["venta", "compra", "alquiler", "inmueble", "costa del este"]
 df = clean_messages(df, 'msg')
 
 
-# filtered_df =  match_keywords(df, "msg", ['costa del este' ], True)
+# filtered_df =  match_keywords(df, "msg", keywords, True)
 # Define your keywords
-keywords = ["venta", "compra", "alquiler", "inmueble", "costa del este"]
+filtered_df = nlp_fuzzy_match(df, "msg", specifications_dict)
 
-# Initialize the PhraseMatcher with your keywords
-matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
-patterns = [nlp(text.lower()) for text in keywords]
-matcher.add("Keyword", None, *patterns)
 
-# Apply the NLP matching
-filtered_df = nlp_match(df, "msg")
-result = extract_apartment_specifications(filtered_df, 'msg')
+
 
 # Print the results
-print(result)
+print(filtered_df)
+# print(ratio)
+filtered_df.to_csv("output-sample.csv", index=False, encoding='UTF-8')
 
 
 # user_name = "Meibilin Castellanos" # Replace with the user name you want to filter by
@@ -256,7 +295,7 @@ print(result)
 
 # print(filtered_df)
 
-result.to_csv("sample.csv", index=False, encoding='UTF-8')
+# result.to_csv("sample.csv", index=False, encoding='UTF-8')
 
 
 # df = rawToDf("sample-brokers.txt", '12hr')
